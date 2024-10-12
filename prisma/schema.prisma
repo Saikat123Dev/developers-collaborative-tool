@@ -19,8 +19,11 @@ model User {
   name     String
   username String @unique
   password String
-
+  verificationToken String?  // Used for email verification
+  verified          Boolean  @default(false)  // Tracks if the user is verified
+  createdAt         DateTime @default(now())
   @@index([username(sort: Asc)])
 }
+
 
 

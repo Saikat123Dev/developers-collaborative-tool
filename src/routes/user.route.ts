@@ -1,5 +1,5 @@
 import express from "express";
-import { createUser, deleteUser, loginUser, logoutUser } from "../controllers/user.controller";
+import { createUser, deleteUser, loginUser, logoutUser, verifyEmail } from "../controllers/user.controller";
 import { Request, Response, NextFunction } from 'express';
 import { authMiddleware } from "../middleware/authMiddleware";
 
@@ -35,4 +35,12 @@ router.delete("/delete",authMiddleware,async (req: Request, res: Response, next:
       next(error);
     }
     });
+
+router.get("/verify-email",async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      await verifyEmail(req, res);
+    } catch (error) {
+      next(error);
+    }
+    })
 export default router;

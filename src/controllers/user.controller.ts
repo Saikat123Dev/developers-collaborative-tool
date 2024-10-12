@@ -5,13 +5,13 @@ import { signupSchema } from "../validation/Signup.Schema";
 import { loginSchema } from "../validation/Login.Schema";
 import { CountingBloomFilter } from 'bloom-filters';
 import Redis from 'ioredis';
-import generateToken from "../utils/generateToken";
-
+import {generateToken} from "../utils/generateToken";
+import { sendEmail } from "../utils/emailService";
+import {generateVerificationToken} from "../utils/generateToken"
 const prisma = new PrismaClient();
 const filter = new CountingBloomFilter(1000000, 5);
 const redis = new Redis();
 
-// Function to initialize the Bloom filter with existing users
 async function initializeBloomFilter() {
   const users = await prisma.user.findMany({
     select: { username: true }
@@ -20,54 +20,102 @@ async function initializeBloomFilter() {
   console.log(`Bloom filter initialized with ${users.length} users`);
 }
 
-// Call this function when your server starts
-initializeBloomFilter().catch(console.error);
+
 
 const createUser = async (req: Request, res: Response) => {
-  const { email, name, username, password } = req.body;
-  try {
-    const signUpValidation = signupSchema.safeParse(req.body);
-    if (!signUpValidation.success) {
-      return res.status(400).json({ errors: signUpValidation.error.errors });
-    }
-
-    if (filter.has(username)) {
-      const cachedUser = await redis.get(username);
-      if (cachedUser) {
-        return res.status(400).json({ message: "Username already exists" });
-      } else {
-        const existingUser = await prisma.user.findUnique({
-          where: { username },
-        });
-        if (existingUser) {
-          await redis.set(username, JSON.stringify(existingUser), 'EX', 3600);
+    const { email, name, username, password } = req.body;
+    try {
+      const signUpValidation = signupSchema.safeParse(req.body);
+      if (!signUpValidation.success) {
+        return res.status(400).json({ errors: signUpValidation.error.errors });
+      }
+  
+      // Check if username already exists
+      if (filter.has(username)) {
+        const cachedUser = await redis.get(username);
+        if (cachedUser) {
           return res.status(400).json({ message: "Username already exists" });
+        } else {
+          const existingUser = await prisma.user.findUnique({
+            where: { username },
+          });
+          if (existingUser) {
+            await redis.set(username, JSON.stringify(existingUser), 'EX', 3600);
+            return res.status(400).json({ message: "Username already exists" });
+          }
         }
       }
+  
+      // Hash the password
+      const hashedPassword = await bcrypt.hash(password, 10);
+      
+      // Generate a verification token
+     
+      const verificationToken = generateVerificationToken({
+          username
+      });
+  
+      const newUser = await prisma.user.create({
+        data: {
+          email,
+          name,
+          username,
+          password: hashedPassword,
+          verificationToken,
+        },
+      });
+ 
+      const verificationLink = `http://localhost:3000/api/verify-email?token=${verificationToken}`;
+      await sendEmail(email, "Email Verification", `Please verify your email by clicking on this link: ${verificationLink}`);
+  
+      filter.add(username);
+      await redis.set(username, JSON.stringify(newUser), 'EX', 3600);
+  
+      const payload = {
+        id: newUser.id,
+        username: newUser.username,
+      };
+      const token = generateToken(payload);
+      
+      return res.status(201).json({ message: "User created successfully. Please check your email to verify your account.", user: newUser, token });
+    } catch (error) {
+      console.error("Error creating user:", error);
+      return res.status(500).json({ message: "Internal server error" });
     }
+  };
+  
 
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const newUser = await prisma.user.create({
-      data: {
-        email,
-        name,
-        username,
-        password: hashedPassword,
-      },
-    });
-    filter.add(username);
-    await redis.set(username, JSON.stringify(newUser), 'EX', 3600);
-    const payload = {
-      id: newUser.id,
-      username: newUser.username,
-    };
-    const token = generateToken(payload);
-    return res.status(201).json({ message: "User created successfully", user: newUser, token });
-  } catch (error) {
-    console.error("Error creating user:", error);
-    return res.status(500).json({ message: "Internal server error" });
-  }
-};
+  export const verifyEmail = async (req:Request, res:Response) => {
+    const token = Array.isArray(req.query.token) ? req.query.token[0] : req.query.token;
+  
+    try {
+      if (typeof token !== 'string') {
+        return res.status(400).json({ message: 'Invalid token' });
+      }
+  
+     
+      const user = await prisma.user.findFirst({
+        where: { verificationToken: token },
+      });
+  
+      if (!user) {
+        return res.status(400).json({ message: 'Invalid or expired token' });
+      }
+  
+      await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          verified: true,
+          verificationToken: null, 
+        },
+      });
+  
+      res.status(200).json({ message: 'Email verified successfully' });
+    } catch (error) {
+      console.error('Error verifying email:', error);
+      res.status(500).json({ message: 'Internal server error' });
+    }
+  };
 
 const loginUser = async (req: Request, res: Response) => {
   const { username, password } = req.body;
@@ -87,8 +135,7 @@ const loginUser = async (req: Request, res: Response) => {
       });
       if (user) {
         await redis.set(username, JSON.stringify(user), 'EX', 3600);
-        // Ensure the username is in the Bloom filter
-        if (!filter.has(username)) {
+         if (!filter.has(username)) {
           filter.add(username);
         }
       }
